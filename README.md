@@ -56,6 +56,67 @@ or pass the desired IP address, port and trusted SKIs like so:
 ./gradlew run --args="localhost 8080 e268fabdcbb076e13d5f2ea7df6b2d7c382a967f"
 ```
 
+## Reproducing the dispose()/close() stall
+
+The `demo` application also serves as a self-contained reproduction case for a
+known issue: tearing down a `Device` (`communication.disconnect()` followed by
+`device.close()`) can take far longer than expected - anywhere from several
+seconds to roughly a minute - once that device has an actively running outgoing
+DeviceDiagnosis Heartbeat (i.e. it has completed a real SPINE UseCasePartner
+discovery with an "EnergyGuard" partner).
+
+To make this reproducible without any external hardware or a second tool, the
+demo now also starts a second, local `Device` running `EnergyGuardStub`
+(`projects/demo/.../demo/EnergyGuardStub.java`) - a minimal, deliberately
+incomplete stand-in for a real EnergyGuard actor that satisfies just enough of
+the SPINE discovery requirements for the ControllableSystem device to find it,
+subscribe to its Heartbeat feature, and start its own outgoing Heartbeat.
+
+Run it with no arguments:
+```bash
+./gradlew run
+```
+
+What to expect in the log:
+1. Both devices start; each reads back its own SKI and logs it
+   (`ControllableSystem device SKI: ...` / `EnergyGuardStub device SKI: ...`),
+   then mutually trusts the other via `ConnectClientsTo.TRUSTED` - see the
+   `Main` class javadoc for why this is *not* `ConnectClientsTo.ALL`.
+2. `EnergyGuardStub ready at ...` (from `EnergyGuardStub#setup()`) confirms the
+   stub device came up.
+3. A SPINE UseCasePartner match / "beginning Use Case execution"-style log
+   line from the ControllableSystem side confirms it discovered the stub and
+   started its own outgoing Heartbeat.
+4. After a fixed settle time, the demo logs
+   `=== Triggering ControllableSystem teardown (communication.disconnect() +
+   device.close()) ===` and calls `communication.disconnect()` then
+   `device.close()`, timing each step.
+5. If the issue reproduces, the `device.close()` step's timing log will show a
+   stall of several seconds up to roughly a minute before the demo exits,
+   instead of returning near-instantly.
+
+This reproduction intentionally only demonstrates the symptom; the demo's log
+output and the library's own logging around this call path should be
+sufficient starting points for investigating the cause.
+
+> **2026-09-14 note:** an earlier version of this reproduction used
+> `ConnectClientsTo.ALL` instead of `TRUSTED`, purely to avoid a manual SKI
+> exchange. On a network where other, unrelated SHIP/SPINE devices are
+> reachable via mDNS, that made both local demo devices indiscriminately
+> attempt discovery/connection against those unrelated real devices too -
+> observed to prevent the two demo devices from ever completing pairing with
+> *each other*, and to make the run take minutes instead of seconds. If runs
+> still don't reach step 3 after this change, mDNS *enumeration* itself
+> (independent of trust mode) can still be slow on hosts with many network
+> interfaces (e.g. a Docker host with many veth interfaces) - try raising
+> `DISCOVERY_SETTLE_TIME_MILLIS` in `Main.java` further.
+>
+> Written and verified against jEEBus.SHIP 2.3.0 / jEEBus.SPINE (pre-4.1.1).
+> This repo's dependencies have since moved to SHIP 3.0.1 / SPINE 4.1.1
+> (already flagged elsewhere as containing breaking API changes) - this
+> reproduction, including the `TRUSTED`/mutual-SKI change above, has not yet
+> been re-verified to still build against those versions.
+
 ## Quick Start
 
 What sets our implementation apart from other EEBus stacks is that we also
